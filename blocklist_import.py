@@ -1683,17 +1683,23 @@ class CrowdSecLAPI:
         """
         Get all existing decision IPs from CrowdSec.
 
-        Returns a set of IP addresses/CIDRs that already have decisions.
-        Uses bouncer API key for read access.
+        Returns a list of IP addresses/CIDRs that already have decisions.
+        Uses machine JWT auth when available (returns full decision set).
+        Falls back to bouncer API key if machine credentials aren't configured.
         """
         existing: list[tuple[str, timedelta]] = []
 
         try:
+            # Prefer machine JWT auth — returns the full decision set
+            # (bouncer API returns a stream delta after the first pull,
+            #  causing subsequent runs to see 0 decisions and reimport everything)
+            headers = self._get_machine_headers() or self.bouncer_headers
+
             response = self.session.get(
                 f"{self.base_url}/v1/decisions",
-                headers=self.bouncer_headers,
-                timeout=60,
-                params={"limit": 1000000},  # fetch all decisions, not just first page
+                headers=headers,
+                timeout=120,
+                params={"limit": 500000},  # generous ceiling for large datasets
             )
 
             if response.status_code == 200:
@@ -1705,6 +1711,16 @@ class CrowdSecLAPI:
                         expiration = parse_duration(expiration_str)
                         if value:
                             existing.append((value, expiration))
+            elif response.status_code == 403 and headers is self.bouncer_headers:
+                self.logger.error(f"Forbidden: check your LAPI_API_KEY")
+                self.logger.error(f"Response: {response}")
+            elif response.status_code == 403:
+                # Machine JWT failed — fall back to bouncer auth
+                self.logger.warning(
+                    "Machine JWT rejected for decision query, "
+                    "falling back to bouncer API key"
+                )
+                return self._get_existing_ips_via_bouncer()
             else:
                 self.logger.error(f"Error calling {self.base_url}/v1/decisions")
                 self.logger.error(f"Response: {response}")
@@ -1714,6 +1730,31 @@ class CrowdSecLAPI:
         except (ValueError, KeyError) as e:
             self.logger.warning(f"Failed to parse existing decisions: {e}")
 
+        return existing
+
+    def _get_existing_ips_via_bouncer(self) -> list[tuple[str, timedelta]]:
+        """Fallback: fetch decisions using bouncer API key (stream mode — may be incomplete)."""
+        existing: list[tuple[str, timedelta]] = []
+        try:
+            response = self.session.get(
+                f"{self.base_url}/v1/decisions",
+                headers=self.bouncer_headers,
+                timeout=60,
+                params={"limit": 500000},
+            )
+            if response.status_code == 200:
+                decisions = response.json()
+                if decisions:
+                    for decision in decisions:
+                        value = decision.get("value", "")
+                        expiration_str = decision.get("duration", "0s")
+                        expiration = parse_duration(expiration_str)
+                        if value:
+                            existing.append((value, expiration))
+        except requests.RequestException as e:
+            self.logger.warning(f"Failed to fetch existing decisions (bouncer): {e}")
+        except (ValueError, KeyError) as e:
+            self.logger.warning(f"Failed to parse existing decisions (bouncer): {e}")
         return existing
 
     def add_decisions(
