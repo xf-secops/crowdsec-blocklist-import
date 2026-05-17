@@ -1712,7 +1712,7 @@ class CrowdSecLAPI:
                         if value:
                             existing.append((value, expiration))
             elif response.status_code == 403 and headers is self.bouncer_headers:
-                self.logger.error(f"Forbidden: check your LAPI_API_KEY")
+                self.logger.error("Forbidden: check your LAPI_API_KEY")
                 self.logger.error(f"Response: {response}")
             elif response.status_code == 403:
                 # Machine JWT failed — fall back to bouncer auth
