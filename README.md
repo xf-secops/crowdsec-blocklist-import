@@ -192,6 +192,60 @@ DECISION_DURATION=24h
 
 All credential variables support Docker Secrets via `_FILE` suffix (e.g., `CROWDSEC_LAPI_KEY_FILE=/run/secrets/lapi_key`).
 
+### LAPI HTTPS and Client Certificate Settings
+
+This importer is a client of CrowdSec LAPI. It has three independent TLS/auth settings:
+
+- `CROWDSEC_LAPI_CA_CERT_PATH` verifies the HTTPS certificate served by LAPI. Use it when connecting to `https://...` and the LAPI server certificate is not trusted by the container's default CA store. This does not authenticate the importer to LAPI.
+- `CROWDSEC_LAPI_AGENT_CERT_PATH` and `CROWDSEC_LAPI_AGENT_KEY_PATH` present an agent client certificate to LAPI. CrowdSec uses this for watcher login/JWT auth, which is needed for writing alerts and decisions.
+- `CROWDSEC_LAPI_BOUNCER_CERT_PATH` and `CROWDSEC_LAPI_BOUNCER_KEY_PATH` present a bouncer client certificate to LAPI. CrowdSec uses this for bouncer auth, which is needed for reading existing decisions from `/v1/decisions`.
+
+Agent and bouncer certificate pairs are optional, but each pair must be complete if used.
+
+For normal HTTPS plus machine credentials/API key:
+
+```bash
+CROWDSEC_LAPI_URL=https://crowdsec:8080
+CROWDSEC_LAPI_CA_CERT_PATH=/certs/crowdsec_lapi.pem
+CROWDSEC_LAPI_KEY=your_bouncer_key
+CROWDSEC_MACHINE_ID=blocklist-import
+CROWDSEC_MACHINE_PASSWORD=your_password
+```
+
+For LAPI client certificate authentication:
+
+```bash
+CROWDSEC_LAPI_URL=https://crowdsec:8080
+CROWDSEC_LAPI_AGENT_CERT_PATH=/certs/blocklist-import-agent.pem
+CROWDSEC_LAPI_AGENT_KEY_PATH=/certs/blocklist-import-agent-key.pem
+CROWDSEC_LAPI_BOUNCER_CERT_PATH=/certs/blocklist-import-bouncer.pem
+CROWDSEC_LAPI_BOUNCER_KEY_PATH=/certs/blocklist-import-bouncer-key.pem
+# Optional and unrelated to the client cert/key:
+CROWDSEC_LAPI_CA_CERT_PATH=/certs/crowdsec_lapi.pem
+```
+
+When `CROWDSEC_LAPI_BOUNCER_CERT_PATH` and `CROWDSEC_LAPI_BOUNCER_KEY_PATH` are set, the importer presents that bouncer certificate for decision reads and does not send the `X-Api-Key` header on those requests. Existing API key and machine JWT authentication continue to work when client certificate/key pairs are not configured.
+
+CrowdSec has two different CA settings that are easy to mix up:
+
+- `CROWDSEC_LAPI_CA_CERT_PATH` is client-side. It tells this importer which CA to trust for the LAPI HTTPS server certificate.
+- `api.server.tls.ca_cert_path` is server-side in CrowdSec. It tells LAPI which CA signed client certificates, so LAPI can verify the agent and bouncer client certificates.
+
+A CrowdSec config with only `cert_file` and `key_file` enables HTTPS for LAPI. It does not require, or enable, client certificate authentication by itself. To use client certificates as authentication, LAPI also needs a client-cert CA and allowed OU, for example:
+
+```yaml
+api:
+  server:
+    tls:
+      cert_file: /usr/local/etc/crowdsec/ssl/crowdsec_lapi.pem
+      key_file: /usr/local/etc/crowdsec/ssl/crowdsec_lapi_key.pem
+      ca_cert_path: /usr/local/etc/crowdsec/ssl/client_ca.pem
+      agents_allowed_ou:
+        - agent-ou
+      bouncers_allowed_ou:
+        - bouncer-ou
+```
+
 ### Common Settings
 
 | Variable | Default | Purpose |
@@ -508,6 +562,14 @@ docker network inspect crowdsec
 ```bash
 # Test bouncer key
 curl -H "X-Api-Key: YOUR_KEY" http://crowdsec:8080/decisions
+
+# Test TLS client certificate auth
+curl --cacert /certs/ca.pem \
+  --cert /certs/blocklist-import.pem \
+  --key /certs/blocklist-import-key.pem \
+  https://crowdsec:8080/v1/watchers/login \
+  -H "Content-Type: application/json" \
+  -d '{"machine_id":"blocklist-import","password":"YourPassword","scenarios":["external/blocklist"]}'
 
 # Test machine login
 curl -X POST http://crowdsec:8080/watchers/login \
